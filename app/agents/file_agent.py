@@ -1,145 +1,115 @@
-from langchain_experimental.agents import create_pandas_dataframe_agent
-from langchain.agents.agent_types import AgentType
-from app.service.azure_service import azure_service
+# app/agents/file_agent.py (Refatorado)
+
 import pandas as pd
-import logging
-from typing import Dict, Any, Optional
+from langchain.agents.agent_types import AgentType
+from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
+from app.service.azure_service import azure_service
 
-logger = logging.getLogger(__name__)
 
-
-class CSVAnalyzerAgent:
+class FileAnalyzerAgent:
     """
-    Agente especializado em analisar arquivos usando LangChain
+    Um agente capaz de analisar arquivos de dados como CSV e vários formatos Excel.
+    A lógica agora separa o upload do arquivo da análise da planilha.
     """
 
     def __init__(self):
         self.llm = azure_service.get_llm()
-        self.df: Optional[pd.DataFrame] = None
+        self.file_path = None
+        self.sheet_names = []
+        self.df = None
         self.agent = None
 
-    def load_csv(self, file_path: str) -> Dict[str, Any]:
+    def load_file(self, file_path: str):
         """
-        Carrega um arquivo CSV e cria o agente
-
-        Args:
-            file_path: Caminho para o arquivo CSV
-
-        Returns:
-            Dict com status e informações do arquivo
+        Carrega um arquivo, identifica o tipo e extrai os nomes das planilhas.
+        Não carrega os dados completos para economizar memória.
         """
+        self.file_path = file_path
         try:
-            # Carregar o CSV
-            self.df = pd.read_csv(file_path)
+            if file_path.endswith('.csv'):
+                self.sheet_names = ['default']
+            else:
+                # Para arquivos Excel, usa ExcelFile para listar as planilhas sem carregar tudo
+                xls = pd.ExcelFile(file_path, engine=self._get_engine(file_path))
+                self.sheet_names = xls.sheet_names
+            return self.sheet_names
+        except Exception as e:
+            # Em caso de erro (arquivo corrompido, formato inválido), reseta o estado
+            self.file_path = None
+            self.sheet_names = []
+            raise ValueError(f"Erro ao ler o arquivo: {e}")
 
+    def select_sheet_and_create_agent(self, sheet_name: str):
+        """
+        Carrega os dados de uma planilha específica em um DataFrame do Pandas
+        e cria o agente LangChain para análise.
+        """
+        if not self.file_path:
+            raise ValueError("Nenhum arquivo foi carregado. Faça o upload primeiro.")
+
+        if sheet_name not in self.sheet_names:
+            raise ValueError(f"Planilha '{sheet_name}' não encontrada no arquivo.")
+
+        try:
+            if self.file_path.endswith('.csv'):
+                self.df = pd.read_csv(self.file_path)
+            else:
+                self.df = pd.read_excel(self.file_path, sheet_name=sheet_name, engine=self._get_engine(self.file_path))
+
+            # Cria o agente com o DataFrame recém-carregado
             self.agent = create_pandas_dataframe_agent(
-                llm=self.llm,
-                df=self.df,
+                self.llm,
+                self.df,
                 verbose=True,
                 agent_type=AgentType.OPENAI_FUNCTIONS,
-                handle_parsing_errors=True,
-                allow_dangerous_code=True
+                allow_dangerous_code=True  # Cuidado com esta opção em produção
             )
-
-            # Informações básicas sobre o arquivo
-            info = {
-                "status": "success",
-                "rows": len(self.df),
-                "columns": len(self.df.columns),
-                "column_names": list(self.df.columns),
-                "preview": self.df.head().to_dict()
-            }
-
-            logger.info(f"CSV carregado com sucesso: {info['rows']} linhas, {info['columns']} colunas")
-            return info
-
+            return f"Planilha '{sheet_name}' carregada com sucesso e pronta para análise."
         except Exception as e:
-            logger.error(f"Erro ao carregar CSV: {str(e)}")
-            return {
-                "status": "error",
-                "message": f"Erro ao carregar arquivo: {str(e)}"
-            }
+            self.df = None
+            self.agent = None
+            raise ValueError(f"Erro ao carregar os dados da planilha '{sheet_name}': {e}")
 
-    def analyze(self, query: str) -> Dict[str, Any]:
+    def analyze(self, query: str) -> str:
         """
-        Executa uma análise no DataFrame usando linguagem natural
-
-        Args:
-            query: Pergunta ou comando em linguagem natural
-
-        Returns:
-            Dict com o resultado da análise
+        Executa uma consulta de linguagem natural usando o agente na planilha carregada.
         """
-        if self.agent is None:
-            return {
-                "status": "error",
-                "message": "Nenhum arquivo CSV foi carregado ainda"
-            }
+        if not self.agent or self.df is None:
+            raise ValueError("Nenhuma planilha selecionada para análise. Use a função de carregar planilha primeiro.")
 
         try:
-            # Executar a query no agente
-            result = self.agent.run(query)
-
-            return {
-                "status": "success",
-                "query": query,
-                "result": result
-            }
-
+            response = self.agent.run(query)
+            return response
         except Exception as e:
-            logger.error(f"Erro ao analisar: {str(e)}")
-            return {
-                "status": "error",
-                "message": f"Erro na análise: {str(e)}"
-            }
+            return f"Ocorreu um erro durante a análise: {e}"
 
-    def get_dataframe_info(self) -> Dict[str, Any]:
-        """Retorna informações detalhadas sobre o DataFrame atual"""
+    def get_dataframe_info(self) -> dict:
+        """
+        Retorna informações sobre o DataFrame da planilha atualmente carregada.
+        """
         if self.df is None:
-            return {"status": "error", "message": "Nenhum DataFrame carregado"}
+            return {"error": "Nenhuma planilha está carregada."}
 
-        try:
-            # Converter dtypes para string para serialização JSON
-            dtypes_dict = {}
-            for col, dtype in self.df.dtypes.items():
-                dtypes_dict[col] = str(dtype)
+        return {
+            "file_path": self.file_path,
+            "sheet_name": self.df.attrs.get('sheet_name', 'default'),  # Guardando o nome da planilha
+            "num_rows": self.df.shape[0],
+            "num_cols": self.df.shape[1],
+            "columns": self.df.columns.tolist(),
+            "data_types": {col: str(dtype) for col, dtype in self.df.dtypes.items()},
+            "description": self.df.describe(include='all').to_dict()
+        }
 
-            # Converter describe() de forma segura
-            description = {}
-            describe_df = self.df.describe(include='all')
-            for col in describe_df.columns:
-                description[col] = {}
-                for idx in describe_df.index:
-                    value = describe_df.loc[idx, col]
-                    # Converter valores numpy para Python nativo
-                    if pd.notna(value):
-                        if hasattr(value, 'item'):
-                            description[col][idx] = value.item()
-                        else:
-                            description[col][idx] = str(value)
-                    else:
-                        description[col][idx] = None
-
-            return {
-                "status": "success",
-                "shape": {
-                    "rows": self.df.shape[0],
-                    "columns": self.df.shape[1]
-                },
-                "columns": list(self.df.columns),
-                "dtypes": dtypes_dict,
-                "null_counts": self.df.isnull().sum().to_dict(),
-                "description": description,
-                "memory_usage": self.df.memory_usage().to_dict()
-            }
-
-        except Exception as e:
-            logger.error(f"Erro ao obter informações do DataFrame: {str(e)}")
-            return {
-                "status": "error",
-                "message": f"Erro ao processar informações: {str(e)}"
-            }
+    def _get_engine(self, file_path: str):
+        """Função auxiliar para determinar o motor de leitura do pandas."""
+        if file_path.endswith('.xlsx') or file_path.endswith('.xlsm'):
+            return 'openpyxl'
+        if file_path.endswith('.xlsb'):
+            return 'pyxlsb'
+        if file_path.endswith('.xls'):
+            return 'xlrd'
+        return None
 
 
-# Instância do agente
-csv_agent = CSVAnalyzerAgent()
+# Instância única do nosso agente (padrão Singleton)
+file_agent = FileAnalyzerAgent()

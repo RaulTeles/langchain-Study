@@ -1,91 +1,94 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Any
-from app.agents.file_agent import csv_agent
+from typing import List
+from app.agents.file_agent import file_agent
 from app.service.azure_service import azure_service
 import os
-import shutil
+import re
 
 router = APIRouter()
 
+ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.xls', '.xlsb', '.xlsm'}
 
-class AnalyzeRequest(BaseModel):
+
+class AnalysisRequest(BaseModel):
+    sheet_name: str
     query: str
 
-
-class AnalyzeResponse(BaseModel):
-    status: str
-    result: Any
+class AnalysisResponse(BaseModel):
+    response: str
 
 
-# Rotas
-@router.get("/test-connection")
-async def test_azure_connection():
-    """Testa a conexão com o Azure OpenAI"""
-    return azure_service.test_connection()
+class SheetListResponse(BaseModel):
+    sheets: List[str]
+
+def secure_filename(filename: str) -> str:
+
+    filename = filename.replace(' ', '-')
+    filename = re.sub(r'[^a-zA-Z0-9._-]', '', filename)
+    filename = filename.lstrip('._-')
+    return filename
 
 
-@router.post("/upload-csv")
-async def upload_csv(file: UploadFile = File(...)):
-    """
-    Faz upload de um arquivo CSV e o carrega no agente
-    """
-    # Validar se é um arquivo CSV
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(status_code=400, detail="Apenas arquivos CSV são permitidos")
+@router.post("/upload-file", summary="Faz upload de um arquivo de dados (CSV ou Excel)")
+def upload_file(file: UploadFile = File(...)):
+    original_filename, file_extension = os.path.splitext(file.filename)
+    file_extension = file_extension.lower()
 
-    file_path = f"data/{file.filename}"
+    if file_extension not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400,
+                            detail=f"Tipo de arquivo não suportado. Permitidos: {', '.join(ALLOWED_EXTENSIONS)}")
+
+    data_dir = "data"
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+
+    safe_basename = secure_filename(original_filename)
+    safe_filename = f"{safe_basename}{file_extension}"
+
+    file_path = os.path.join(data_dir, safe_filename)
+
+    with open(file_path, "wb") as buffer:
+        buffer.write(file.file.read())
 
     try:
-        # Criar diretório se não existir
-        os.makedirs("data", exist_ok=True)
+        sheets = file_agent.load_file(file_path)
+        return {"message": "Arquivo carregado com sucesso.", "file_name": safe_filename, "available_sheets": sheets}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-        # Salvar arquivo
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
 
-        # Carregar no agente
-        result = csv_agent.load_csv(file_path)
+@router.get("/sheets", response_model=SheetListResponse, summary="Lista as planilhas do arquivo carregado")
+def get_sheets():
+    if not file_agent.file_path:
+        raise HTTPException(status_code=404, detail="Nenhum arquivo foi carregado ainda.")
+    return {"sheets": file_agent.sheet_names}
 
-        if result["status"] == "error":
-            raise HTTPException(status_code=400, detail=result["message"])
 
-        return result
+@router.post("/analyze", response_model=AnalysisResponse, summary="Analisa uma planilha específica do arquivo")
+def analyze(request: AnalysisRequest):
+    try:
+        file_agent.select_sheet_and_create_agent(request.sheet_name)
 
+        response = file_agent.analyze(request.query)
+        return {"response": response}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Erro interno do servidor: {e}")
 
 
-@router.post("/analyze", response_model=AnalyzeResponse)
-async def analyze_csv(request: AnalyzeRequest):
-    """
-    Analisa o CSV carregado usando linguagem natural
-
-    Exemplos de queries:
-    - "Quantas linhas tem o arquivo?"
-    - "Quais são as colunas?"
-    - "Mostre um resumo estatístico dos dados"
-    - "Quais são os valores únicos da coluna X?"
-    """
-    result = csv_agent.analyze(request.query)
-
-    if result["status"] == "error":
-        raise HTTPException(status_code=400, detail=result["message"])
-
-    return AnalyzeResponse(
-        status=result["status"],
-        result=result["result"]
-    )
-
-
-@router.get("/dataframe-info")
-async def get_dataframe_info():
-    """Retorna informações detalhadas sobre o DataFrame carregado"""
-    info = csv_agent.get_dataframe_info()
-
-    if info["status"] == "error":
-        raise HTTPException(status_code=400, detail=info["message"])
-
+@router.get("/dataframe-info", summary="Obtém informações sobre a planilha atualmente carregada")
+def get_dataframe_info():
+    if not file_agent.agent:
+        raise HTTPException(status_code=400, detail="Nenhuma planilha foi selecionada para análise.")
+    info = file_agent.get_dataframe_info()
     return info
+
+
+@router.get("/test-connection", summary="Testa a conexão com o serviço da Azure OpenAI")
+def test_connection():
+    try:
+        return azure_service.test_connection()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
