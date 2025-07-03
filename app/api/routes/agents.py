@@ -65,12 +65,15 @@ def get_sheets():
     return {"sheets": file_agent.sheet_names}
 
 
-@router.post("/analyze", response_model=AnalysisResponse, summary="Analisa uma planilha específica do arquivo")
+@router.post("/analyze", response_model=AnalysisResponse, summary="Executa uma tarefa complexa usando o sistema de IA")
 def analyze(request: AnalysisRequest):
     try:
-        file_agent.select_sheet_and_create_agent(request.sheet_name)
+        # Passo 1: Prepara toda a arquitetura de agentes para a planilha selecionada
+        file_agent.setup_agents(request.sheet_name)
 
-        response = file_agent.analyze(request.query)
+        # Passo 2: Executa a consulta no agente "chefe" (o Orquestrador)
+        response = file_agent.run_main_agent(request.query)
+
         return {"response": response}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -80,15 +83,15 @@ def analyze(request: AnalysisRequest):
 
 @router.get("/dataframe-info", summary="Obtém informações sobre a planilha atualmente carregada")
 def get_dataframe_info():
-    if not file_agent.agent:
-        raise HTTPException(status_code=400, detail="Nenhuma planilha foi selecionada para análise.")
-    info = file_agent.get_dataframe_info()
+
+    if file_agent.df is None:
+        raise HTTPException(status_code=400,
+                            detail="Nenhuma planilha foi selecionada e carregada para análise. Chame /analyze com uma planilha primeiro.")
+    info = {
+        "file_path": file_agent.file_path,
+        "sheet_name": getattr(file_agent.df, 'attrs', {}).get('sheet_name', 'default'),
+        "num_rows": file_agent.df.shape[0],
+        "num_cols": file_agent.df.shape[1],
+        "columns": file_agent.df.columns.tolist(),
+    }
     return info
-
-
-@router.get("/test-connection", summary="Testa a conexão com o serviço da Azure OpenAI")
-def test_connection():
-    try:
-        return azure_service.test_connection()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))

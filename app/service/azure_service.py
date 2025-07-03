@@ -21,20 +21,17 @@ class AzureOpenAIService:
         return cls._instance
 
     def __init__(self):
-        """Inicializa o serviço com as configurações do Azure"""
         if self._llm is None:
             self._initialize_llm()
 
     def _initialize_llm(self):
         """Inicializa a conexão com Azure OpenAI"""
         try:
-            # Log das configurações (sem mostrar a API key completa)
             logger.info(f"Inicializando Azure OpenAI...")
             logger.info(f"Endpoint: {settings.azure_openai_endpoint}")
             logger.info(f"Deployment: {settings.azure_openai_deployment_name}")
             logger.info(f"API Version: {settings.azure_openai_api_version}")
 
-            # Criar a instância do Azure Chat OpenAI
             self._llm = AzureChatOpenAI(
                 azure_endpoint=settings.azure_openai_endpoint,
                 deployment_name=settings.azure_openai_deployment_name,
@@ -47,7 +44,7 @@ class AzureOpenAIService:
             logger.info("✅ Serviço Azure OpenAI inicializado com sucesso!")
 
         except Exception as e:
-            logger.error(f"❌ Erro ao inicializar Azure OpenAI: {str(e)}")
+            logger.error(f" Erro ao inicializar Azure OpenAI: {str(e)}")
             logger.error(f"Tipo do erro: {type(e).__name__}")
             self._llm = None
             raise
@@ -58,62 +55,6 @@ class AzureOpenAIService:
             self._initialize_llm()
         return self._llm
 
-    def test_connection(self):
-        """Testa a conexão com o Azure OpenAI"""
-        try:
-            if self._llm is None:
-                return {
-                    "status": "error",
-                    "message": "LLM não foi inicializado corretamente"
-                }
-
-            logger.info("Testando conexão com Azure OpenAI...")
-
-            # Teste simples
-            messages = [{"role": "user", "content": "Olá, teste de conexão!"}]
-            response = self._llm.invoke(messages)
-
-            logger.info("✅ Conexão bem-sucedida!")
-
-            return {
-                "status": "connected",
-                "message": "Conexão com Azure OpenAI funcionando!",
-                "response": response.content if hasattr(response, 'content') else str(response)
-            }
-
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"❌ Erro na conexão: {error_msg}")
-
-            # Mensagens de erro mais específicas
-            if "api_key" in error_msg.lower():
-                return {
-                    "status": "error",
-                    "message": "Erro de autenticação: Verifique sua API Key",
-                    "details": error_msg
-                }
-            elif "endpoint" in error_msg.lower():
-                return {
-                    "status": "error",
-                    "message": "Erro de endpoint: Verifique a URL do Azure",
-                    "details": error_msg
-                }
-            elif "deployment" in error_msg.lower():
-                return {
-                    "status": "error",
-                    "message": "Erro de deployment: Verifique o nome do deployment",
-                    "details": error_msg
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": f"Erro na conexão: {error_msg}",
-                    "error_type": type(e).__name__,
-                    "details": error_msg
-                }
-
-
-# Criar instância do serviço
 try:
     azure_service = AzureOpenAIService()
 except Exception as e:
